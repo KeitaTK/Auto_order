@@ -258,66 +258,125 @@ class MonotaroExcelApp:
             # ============ 型番取得 ============
             model_number = ''
             
-            # dl > dt/dd から取得（構造化データ）
-            dts = soup.find_all('dt')
-            for dt in dts:
-                dt_text = dt.get_text(strip=True)
-                if '型番' in dt_text or 'SKU' in dt_text:
-                    dd = dt.find_next('dd')
-                    if dd:
-                        model_number = dd.get_text(strip=True)
+            # 方法1: span.AttributeLabelItem から取得（品番M2.5×16 形式）
+            attr_labels = soup.select('span.AttributeLabelItem')
+            for attr_label in attr_labels:
+                text = attr_label.get_text(strip=True)
+                # "品番M2.5×16" から "M2.5×16" を抽出
+                if '品番' in text:
+                    match = re.search(r'品番(.+)', text)
+                    if match:
+                        model_number = match.group(1).strip()
                         break
             
-            # tableのtdから取得
+            # 方法2: タイトルから型番を抽出（M2.5×16 商品名... 形式）
+            if not model_number:
+                title_tag = soup.select_one('title')
+                if title_tag:
+                    title_text = title_tag.get_text(strip=True)
+                    # パターン: 型番が先頭にある（M2.5×16のような形式）
+                    # 数字、アルファベット、×、-、.などを含む可能性
+                    match = re.match(r'^([A-Z0-9\.\-]+[×x][A-Z0-9\.\-]+)\s+', title_text, re.IGNORECASE)
+                    if match:
+                        model_number = match.group(1)
+            
+            # 方法3: dl > dt/dd から取得（構造化データ）
+            if not model_number:
+                dts = soup.find_all('dt')
+                for dt in dts:
+                    dt_text = dt.get_text(strip=True)
+                    if '型番' in dt_text or 'SKU' in dt_text or '品番' in dt_text:
+                        dd = dt.find_next('dd')
+                        if dd:
+                            model_number = dd.get_text(strip=True)
+                            break
+            
+            # 方法4: tableのtdから取得
             if not model_number:
                 rows = soup.find_all('tr')
                 for row in rows:
                     cells = row.find_all(['th', 'td'])
                     if cells and len(cells) >= 2:
                         header = cells[0].get_text(strip=True)
-                        if '型番' in header:
+                        if '型番' in header or '品番' in header:
                             model_number = cells[1].get_text(strip=True)
                             break
             
             # ============ 価格取得 ============
-            price = ''
+            price_tax_excluded = ''  # 税別価格
+            price_tax_included = ''  # 税込価格
             
-            # 複数の価格セレクタを試す
-            price_patterns = [
-                'span[class*="price"]',
-                'span[class*="Price"]',
-                '.p-price',
-                '.productPrice',
-                'div[data-testid*="price"]'
-            ]
-            
-            for pattern in price_patterns:
-                price_elements = soup.select(pattern)
-                for elem in price_elements:
-                    price_text = elem.get_text(strip=True)
-                    # 数字を抽出
+            # 方法1: 販売価格(税別)と販売価格(税込)を直接取得
+            # 税別価格: SellingPrice__Title の次の Price--Lg
+            selling_price_title = soup.select_one('.SellingPrice__Title')
+            if selling_price_title:
+                price_elem = selling_price_title.find_next('span', class_='Price--Lg')
+                if price_elem:
+                    price_text = price_elem.get_text(strip=True)
                     numbers = re.findall(r'\d+', price_text.replace(',', ''))
                     if numbers:
-                        # 最も大きい数字（通常は価格）
-                        price = max(numbers, key=int)
-                        break
-                if price:
-                    break
+                        price_tax_excluded = numbers[0]
             
-            # 価格が見つからない場合、テキスト内を直接探索
-            if not price:
+            # 税込価格: 販売価格(税込)を含むReferencePrice
+            ref_price_title = soup.find('span', class_='ReferencePrice__Title', string=re.compile(r'販売価格.*税込'))
+            if ref_price_title and ref_price_title.parent:
+                parent_text = ref_price_title.parent.get_text(strip=True)
+                numbers = re.findall(r'[\d,]+', parent_text)
+                if numbers:
+                    price_tax_included = numbers[-1].replace(',', '')
+            
+            # 方法2: フォールバック - 複数の価格セレクタを試す（税込価格として扱う）
+            if not price_tax_included and not price_tax_excluded:
+                price_patterns = [
+                    'span[class*="price"]',
+                    'span[class*="Price"]',
+                    '.p-price',
+                    '.productPrice',
+                    'div[data-testid*="price"]'
+                ]
+                
+                for pattern in price_patterns:
+                    price_elements = soup.select(pattern)
+                    for elem in price_elements:
+                        price_text = elem.get_text(strip=True)
+                        # 数字を抽出
+                        numbers = re.findall(r'\d+', price_text.replace(',', ''))
+                        if numbers:
+                            # 最も大きい数字（通常は価格）を税込として扱う
+                            price_tax_included = max(numbers, key=int)
+                            break
+                    if price_tax_included:
+                        break
+            
+            # 方法3: 価格が見つからない場合、テキスト内を直接探索
+            if not price_tax_included and not price_tax_excluded:
                 page_text = soup.get_text()
                 # 「¥xxx」パターンで検索
                 price_match = re.search(r'¥([\d,]+)', page_text)
                 if price_match:
-                    price = price_match.group(1).replace(',', '')
+                    price_tax_included = price_match.group(1).replace(',', '')
+            
+            # 税別が取得できて税込がない場合は計算
+            if price_tax_excluded and not price_tax_included:
+                try:
+                    price_tax_included = str(int(float(price_tax_excluded) * 1.1))
+                except:
+                    pass
+            
+            # 税込が取得できて税別がない場合は計算
+            if price_tax_included and not price_tax_excluded:
+                try:
+                    price_tax_excluded = str(int(float(price_tax_included) / 1.1))
+                except:
+                    pass
             
             return {
                 'supplier': 'モノタロウ',
                 'item_code': item_code or '',
                 'product_name': product_name,
                 'model_number': model_number or '',
-                'price': price or '',
+                'price_tax_excluded': price_tax_excluded or '',
+                'price_tax_included': price_tax_included or '',
                 'url': url
             }
         
@@ -343,7 +402,7 @@ class MonotaroExcelApp:
                 ws.title = sheet_name if sheet_name else '注文内容'
                 
                 # ヘッダ行を作成
-                headers = ['仕入元', '商品コード', '商品名', '型番', '価格(税別)', '個数', 'URL', '価格(税込)']
+                headers = ['仕入元', '商品コード', '商品名', '型番', '単価', '数量', '合計', 'URL', '価格(税込)']
                 ws.append(headers)
                 
                 # ヘッダの書式設定
@@ -355,26 +414,52 @@ class MonotaroExcelApp:
             
             # データを書き込み
             for idx, data in enumerate(data_list):
-                price_tax_excluded = data.get('price', '')
-                # 税込価格を計算（税別価格 × 1.1）
-                price_tax_included = ''
-                if price_tax_excluded:
+                # データから税別・税込価格を取得（既に取得済み）
+                price_tax_excluded = data.get('price_tax_excluded', '')
+                price_tax_included = data.get('price_tax_included', '')
+                quantity = data.get('quantity', '')
+                
+                # 合計(税別)を計算
+                total_tax_excluded = ''
+                if price_tax_excluded and quantity:
                     try:
                         price_num = float(str(price_tax_excluded).replace(',', ''))
-                        price_tax_included = str(int(price_num * 1.1))
+                        qty_num = int(str(quantity))
+                        total_tax_excluded = str(int(price_num * qty_num))
                     except:
                         pass
                 
-                ws.append([
+                # 商品コードと型番を文字列として明示的に処理
+                item_code = data.get('item_code', '')
+                model_number = data.get('model_number', '')
+                
+                # 行を追加
+                row = [
                     data.get('supplier', 'モノタロウ'),
-                    data.get('item_code', ''),
+                    item_code,  # 商品コード
                     data.get('product_name', ''),
-                    data.get('model_number', ''),
-                    price_tax_excluded,
-                    data.get('quantity', ''),
+                    model_number,  # 型番
+                    price_tax_excluded,  # 単価
+                    quantity,  # 数量
+                    total_tax_excluded,  # 合計
                     data.get('url', ''),
-                    price_tax_included
-                ])
+                    price_tax_included  # 価格(税込)
+                ]
+                ws.append(row)
+                
+                # 商品コードと型番のセルを文字列として明示的に設定
+                current_row = ws.max_row
+                # 商品コード（B列=2）
+                if item_code:
+                    cell_item_code = ws.cell(row=current_row, column=2)
+                    cell_item_code.value = str(item_code)
+                    cell_item_code.number_format = '@'  # テキスト形式
+                
+                # 型番（D列=4）
+                if model_number:
+                    cell_model = ws.cell(row=current_row, column=4)
+                    cell_model.value = str(model_number)
+                    cell_model.number_format = '@'  # テキスト形式
             
             # 列の幅を自動調整
             for column in ws.columns:
