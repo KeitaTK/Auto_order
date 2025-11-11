@@ -529,7 +529,7 @@ class MonotaroExcelApp:
                     print(f'データ取得失敗: {url}')
                 
                 # レート制限対策（サーバーに優しい）
-                time.sleep(1)
+                time.sleep(0.1)
             
             except Exception as e:
                 print(f'処理エラー: {e}')
