@@ -1,0 +1,7 @@
+requests
+beautifulsoup4
+openpyxl
+pyinstaller
+certifi
+selenium
+undetected-chromedriver
