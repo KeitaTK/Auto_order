@@ -2,6 +2,8 @@ import tkinter as tk
 from tkinter import filedialog, messagebox, ttk
 import openpyxl
 from openpyxl.utils import get_column_letter
+from openpyxl.styles import Font, PatternFill
+from openpyxl.worksheet.worksheet import Worksheet
 import requests
 from bs4 import BeautifulSoup
 import re
@@ -196,10 +198,10 @@ class MonotaroExcelApp:
         """モノタロウの商品ページから商品情報を取得"""
         try:
             # リトライロジック
+            response = None
             for attempt in range(3):
                 try:
                     response = self.session.get(url, timeout=15)
-                    
                     # ステータスコード確認
                     if response.status_code == 403 or 'ログイン' in response.text:
                         # ボット対策またはログイン要求
@@ -209,19 +211,18 @@ class MonotaroExcelApp:
                         else:
                             print(f'ログイン要求またはボット対策: {url}')
                             return None
-                    
                     if response.status_code != 200:
                         print(f'HTTPエラー {response.status_code}: {url}')
                         return None
-                    
                     break
-                
                 except requests.exceptions.Timeout:
                     if attempt < 2:
                         time.sleep(2)
                         continue
                     raise
-            
+            if response is None:
+                print(f'HTTPレスポンスが取得できませんでした: {url}')
+                return None
             # エンコーディング自動検出
             response.encoding = response.apparent_encoding or 'utf-8'
             soup = BeautifulSoup(response.content, 'html.parser')
@@ -318,7 +319,7 @@ class MonotaroExcelApp:
                         price_tax_excluded = numbers[0]
             
             # 税込価格: 販売価格(税込)を含むReferencePrice
-            ref_price_title = soup.find('span', class_='ReferencePrice__Title', string=re.compile(r'販売価格.*税込'))
+            ref_price_title = soup.find('span', class_='ReferencePrice__Title', text=re.compile(r'販売価格.*税込'))
             if ref_price_title and ref_price_title.parent:
                 parent_text = ref_price_title.parent.get_text(strip=True)
                 numbers = re.findall(r'[\d,]+', parent_text)
@@ -387,6 +388,8 @@ class MonotaroExcelApp:
     def write_to_excel(self, file_path, sheet_name, data_list, append=True):
         """Excelファイルにデータを書き込み"""
         try:
+            wb = None
+            ws: Worksheet = None  # 型ヒント追加
             if append and sheet_name:
                 # 既存ファイルに追加
                 try:
@@ -403,26 +406,20 @@ class MonotaroExcelApp:
                 wb = openpyxl.Workbook()
                 ws = wb.active
                 ws.title = sheet_name if sheet_name else '注文内容'
-                
                 # ヘッダ行を作成
-                headers = ['仕入元', '商品コード', '商品名', '型番', '単価', '数量', '合計', 'URL', '価格(税込)']
+                headers = ['メーカー', '注文コード', '商品名', '品番/型番', '単価', '数量', '値段（税別）', 'URL', '税込み']
                 ws.append(headers)
-                
                 # ヘッダの書式設定
                 for cell in ws[1]:
-                    cell.font = openpyxl.styles.Font(bold=True)
-                    cell.fill = openpyxl.styles.PatternFill(start_color='D3D3D3', end_color='D3D3D3', fill_type='solid')
-                
+                    cell.font = Font(bold=True)
+                    cell.fill = PatternFill(start_color='D3D3D3', end_color='D3D3D3', fill_type='solid')
                 start_row = 2
             
             # データを書き込み
             for idx, data in enumerate(data_list):
-                # データから税別・税込価格を取得（既に取得済み）
                 price_tax_excluded = data.get('price_tax_excluded', '')
                 price_tax_included = data.get('price_tax_included', '')
                 quantity = data.get('quantity', '')
-                
-                # 合計(税別)を計算
                 total_tax_excluded = ''
                 if price_tax_excluded and quantity:
                     try:
@@ -431,38 +428,37 @@ class MonotaroExcelApp:
                         total_tax_excluded = str(int(price_num * qty_num))
                     except:
                         pass
-                
-                # 商品コードと型番を文字列として明示的に処理
                 item_code = data.get('item_code', '')
                 model_number = data.get('model_number', '')
-                
-                # 行を追加
                 row = [
-                    data.get('supplier', 'モノタロウ'),
-                    item_code,  # 商品コード
-                    data.get('product_name', ''),
-                    model_number,  # 型番
+                    data.get('supplier', 'モノタロウ'),  # メーカー
+                    item_code,  # 注文コード
+                    data.get('product_name', ''),  # 商品名
+                    model_number,  # 品番/型番
                     price_tax_excluded,  # 単価
                     quantity,  # 数量
-                    total_tax_excluded,  # 合計
-                    data.get('url', ''),
-                    price_tax_included  # 価格(税込)
+                    total_tax_excluded,  # 値段（税別）
+                    data.get('url', ''),  # URL
+                    price_tax_included  # 税込み
                 ]
                 ws.append(row)
-                
-                # 商品コードと型番のセルを文字列として明示的に設定
                 current_row = ws.max_row
                 # 商品コード（B列=2）
                 if item_code:
-                    cell_item_code = ws.cell(row=current_row, column=2)
-                    cell_item_code.value = str(item_code)
-                    cell_item_code.number_format = '@'  # テキスト形式
-                
+                    try:
+                        cell_item_code = ws.cell(row=current_row, column=2)
+                        cell_item_code.value = str(item_code)
+                        cell_item_code.number_format = '@'
+                    except Exception:
+                        pass
                 # 型番（D列=4）
                 if model_number:
-                    cell_model = ws.cell(row=current_row, column=4)
-                    cell_model.value = str(model_number)
-                    cell_model.number_format = '@'  # テキスト形式
+                    try:
+                        cell_model = ws.cell(row=current_row, column=4)
+                        cell_model.value = str(model_number)
+                        cell_model.number_format = '@'
+                    except Exception:
+                        pass
             
             # 列の幅を自動調整
             for column in ws.columns:
@@ -472,7 +468,7 @@ class MonotaroExcelApp:
                     try:
                         if len(str(cell.value)) > max_length:
                             max_length = len(str(cell.value))
-                    except:
+                    except Exception:
                         pass
                 adjusted_width = min(max_length + 2, 50)
                 ws.column_dimensions[column_letter].width = adjusted_width
