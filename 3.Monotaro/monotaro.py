@@ -389,7 +389,10 @@ class MonotaroExcelApp:
         try:
             if append and sheet_name:
                 # 既存ファイルに追加
-                wb = openpyxl.load_workbook(file_path)
+                try:
+                    wb = openpyxl.load_workbook(file_path)
+                except PermissionError:
+                    raise PermissionError(f'ファイルが他のアプリケーションで開かれています。\nファイルを閉じてから実行してください:\n{file_path}')
                 if sheet_name in wb.sheetnames:
                     ws = wb[sheet_name]
                 else:
@@ -474,9 +477,15 @@ class MonotaroExcelApp:
                 adjusted_width = min(max_length + 2, 50)
                 ws.column_dimensions[column_letter].width = adjusted_width
             
-            wb.save(file_path)
+            try:
+                wb.save(file_path)
+            except PermissionError:
+                raise PermissionError(f'ファイルが他のアプリケーションで開かれています。\nファイルを閉じてから実行してください:\n{file_path}')
             return True
         
+        except PermissionError as pe:
+            # PermissionErrorは再発生させて上位で処理
+            raise pe
         except Exception as e:
             print(f'Excel書き込みエラー: {e}')
             return False
@@ -509,16 +518,13 @@ class MonotaroExcelApp:
                 parts = item.split(' | 個数: ')
                 if len(parts) != 2:
                     continue
-                
                 url = parts[0].strip()
                 try:
                     quantity = int(parts[1].strip())
                 except:
                     continue
-                
                 self.status_var.set(f'処理中... ({idx+1}/{total})')
                 self.root.update()
-                
                 # 商品情報を取得
                 result = self.fetch_monotaro_data(url)
                 if result:
@@ -526,11 +532,15 @@ class MonotaroExcelApp:
                     data_list.append(result)
                     success_count += 1
                 else:
-                    print(f'データ取得失敗: {url}')
-                
+                    # 1件でも失敗したら即エラー表示・処理中断
+                    error_message = '以下のURLを正しく開けませんでした。\nURLが商品ページまで指定していることを確認してください:\n\n'
+                    error_message += f'• {url}\n'
+                    self.root.after(0, lambda msg=error_message: messagebox.showerror('エラー', msg))
+                    self.btn_run.config(state='normal')
+                    self.status_var.set('準備完了')
+                    return
                 # レート制限対策（サーバーに優しい）
                 time.sleep(0.1)
-            
             except Exception as e:
                 print(f'処理エラー: {e}')
                 continue
@@ -567,6 +577,14 @@ class MonotaroExcelApp:
                 try:
                     wb = openpyxl.load_workbook(file_path)
                     sheet_name = wb.sheetnames[0] if wb.sheetnames else '注文内容'
+                except PermissionError:
+                    self.root.after(0, lambda fp=file_path: messagebox.showerror(
+                        'エラー', 
+                        f'ファイルが他のアプリケーションで開かれています。\nファイルを閉じてから実行してください:\n{fp}'
+                    ))
+                    self.btn_run.config(state='normal')
+                    self.status_var.set('準備完了')
+                    return
                 except:
                     sheet_name = '注文内容'
                 success = self.write_to_excel(file_path, sheet_name, data_list, append=True)
@@ -578,6 +596,8 @@ class MonotaroExcelApp:
             else:
                 self.root.after(0, lambda: messagebox.showerror('エラー', 'Excelファイルの書き込みに失敗しました'))
         
+        except PermissionError as pe:
+            self.root.after(0, lambda msg=str(pe): messagebox.showerror('エラー', msg))
         except Exception as e:
             self.root.after(0, lambda: messagebox.showerror('エラー', f'エラーが発生しました: {e}'))
         
